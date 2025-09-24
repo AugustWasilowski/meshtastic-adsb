@@ -226,6 +226,22 @@ static struct argp_option optionsReadsb[] = {
     {"soapy-enable-agc", OptSoapyEnableAgc, 0, 0, "enable AGC", 9},
     {"soapy-gain-element", OptSoapyGainElement, "<gain>", 0, "set SoapySDR gain element", 9},
 #endif
+
+#ifdef ENABLE_WATCHLIST
+    {0,0,0,0, "Watchlist and MQTT alerting options:", 10},
+    {0,0,0, OPTION_DOC, "Monitor specific aircraft and send MQTT alerts", 10},
+    {"watchlist-file", OptWatchlistFile, "<path>", 0, "Path to watchlist JSON file (default: /etc/readsb/watchlist.json)", 10},
+    {"mqtt-host", OptMqttHost, "<host>", 0, "MQTT broker hostname or IP address", 10},
+    {"mqtt-port", OptMqttPort, "<port>", 0, "MQTT broker port (default: 1883)", 10},
+    {"mqtt-username", OptMqttUsername, "<user>", 0, "MQTT broker username", 10},
+    {"mqtt-password", OptMqttPassword, "<pass>", 0, "MQTT broker password", 10},
+    {"mqtt-topic", OptMqttTopic, "<topic>", 0, "MQTT topic for alerts (default: meshtastic/adsb/watch)", 10},
+    {"mqtt-qos", OptMqttQos, "<qos>", 0, "MQTT QoS level (0, 1, or 2, default: 0)", 10},
+    {"mqtt-retain", OptMqttRetain, 0, 0, "Set MQTT retain flag for published messages", 10},
+    {"watchlist-cooldown", OptWatchlistCooldown, "<seconds>", 0, "Cooldown period between alerts for same aircraft (default: 300)", 10},
+    {"enable-mqtt", OptEnableMqtt, 0, 0, "Enable MQTT functionality (required for alerts)", 10},
+#endif
+
     {0,0,0,0, "Help options:", 100},
     { 0 }
 };

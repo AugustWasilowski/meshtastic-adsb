@@ -67,7 +67,7 @@
 #define MODES_READSB_VARIANT     "readsb"
 #endif
 
-#define VERSION_STRING MODES_READSB_VARIANT " version: " MODES_READSB_VERSION
+#define VERSION_STRING "readsb version: 3.16.2"
 
 // ============================= Include files ==========================
 
@@ -471,6 +471,11 @@ static inline void munmap_or_exit(void *ptr, size_t size, const char *file, int 
 #include "convert.h"
 #include "sdr.h"
 #include "aircraft.h"
+#ifdef ENABLE_WATCHLIST
+#include "watchlist.h"
+#include "alert_publisher.h"
+#include "mqtt_client.h"
+#endif
 #include "globe_index.h"
 #include "receiver.h"
 #include "geomag.h"
@@ -523,6 +528,8 @@ struct _Threads {
 extern struct _Threads Threads;
 
 struct modeMessage;
+
+
 
 struct messageBuffer {
     struct modesMessage *msg;
@@ -961,6 +968,36 @@ struct _Modes
     struct distCoords (*rangeDirs)[RANGEDIRS_BUCKETS];
 
     int64_t apiShutdownDelay;
+    
+    // Watchlist and MQTT alerting functionality
+    #ifdef ENABLE_WATCHLIST
+    int8_t watchlist_enabled;
+    char *watchlist_file_path;
+    char *mqtt_host;
+    int mqtt_port;
+    char *mqtt_username;
+    char *mqtt_password;
+    char *mqtt_topic;
+    int mqtt_qos;
+    int8_t mqtt_retain;
+    int watchlist_cooldown_seconds;
+    int8_t enable_mqtt;
+    
+    // CLI override flags (to distinguish between defaults and user-provided values)
+    int8_t cli_mqtt_host_set;
+    int8_t cli_mqtt_port_set;
+    int8_t cli_mqtt_username_set;
+    int8_t cli_mqtt_password_set;
+    int8_t cli_mqtt_topic_set;
+    int8_t cli_mqtt_qos_set;
+    int8_t cli_mqtt_retain_set;
+    int8_t cli_watchlist_cooldown_set;
+    
+    // Watchlist and alert publisher instances
+    watchlist_config_t *watchlist_config;
+    alert_publisher_t *alert_publisher;
+    mqtt_client_t *mqtt_client;
+    #endif
 };
 
 extern struct _Modes Modes;
@@ -1364,6 +1401,20 @@ enum {
     OptSoapyBandwith,
     OptSoapyEnableAgc,
     OptSoapyGainElement,
+    
+    // Watchlist and MQTT alerting options
+    #ifdef ENABLE_WATCHLIST
+    OptWatchlistFile,
+    OptMqttHost,
+    OptMqttPort,
+    OptMqttUsername,
+    OptMqttPassword,
+    OptMqttTopic,
+    OptMqttQos,
+    OptMqttRetain,
+    OptWatchlistCooldown,
+    OptEnableMqtt,
+    #endif
 };
 
 

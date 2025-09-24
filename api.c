@@ -1,4 +1,9 @@
 #include "readsb.h"
+#ifdef ENABLE_WATCHLIST
+#include "watchlist.h"
+#include "alert_publisher.h"
+#include "mqtt_client.h"
+#endif
 
 static int apiUpdate();
 static inline uint32_t hexHash(uint32_t addr, struct apiBuffer *buffer) {
@@ -948,6 +953,14 @@ static int apiUpdate() {
 
     int64_t now = mstime();
     ca_lock_read(ca);
+    
+    // Start watchlist alert cycle if enabled
+    #ifdef ENABLE_WATCHLIST
+    if (Modes.watchlist_enabled && Modes.alert_publisher) {
+        alert_publisher_start_cycle(Modes.alert_publisher, now / 1000);
+    }
+    #endif
+    
     for (int i = 0; i < ca->len; i++) {
         struct aircraft *a = ca->list[i];
 
@@ -959,7 +972,25 @@ static int apiUpdate() {
             fprintf(stderr, "transitory: skipping a couple of aircraft for api / json due to insufficient buffer\n");
             break;
         }
+        
+        // Check if aircraft is in watchlist and publish alert if needed
+        #ifdef ENABLE_WATCHLIST
+        if (Modes.watchlist_enabled && Modes.watchlist_config && Modes.alert_publisher && Modes.mqtt_client) {
+            uint32_t icao = a->addr & 0xFFFFFF;
+            if (watchlist_contains(Modes.watchlist_config, icao)) {
+                alert_publisher_publish_alert(Modes.alert_publisher, Modes.mqtt_client, a, now / 1000);
+            }
+        }
+        #endif
     }
+    
+    // End watchlist alert cycle if enabled
+    #ifdef ENABLE_WATCHLIST
+    if (Modes.watchlist_enabled && Modes.alert_publisher) {
+        alert_publisher_end_cycle(Modes.alert_publisher);
+    }
+    #endif
+    
     ca_unlock_read(ca);
 
     // sort api lists

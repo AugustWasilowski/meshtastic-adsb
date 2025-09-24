@@ -53,6 +53,12 @@
 
 #include <sched.h>
 #include "readsb.h"
+#ifdef ENABLE_WATCHLIST
+#include "watchlist.h"
+#include "alert_publisher.h"
+#include "mqtt_client.h"
+#include "mqtt_features.h"
+#endif
 #include "help.h"
 
 #include <sys/time.h>
@@ -91,9 +97,60 @@ static void exitHandler(int sig) {
     if (sig == SIGTERM) { sigX = "SIGTERM"; }
     if (sig == SIGINT) { sigX = "SIGINT"; }
     if (sig == SIGQUIT) { sigX = "SIGQUIT"; }
-    if (sig == SIGHUP) { sigX = "SIGHUP"; }
     log_with_timestamp("Caught %s, shutting down...", sigX);
 }
+
+#ifdef ENABLE_WATCHLIST
+// Global flag for SIGHUP signal handling - volatile for signal safety
+static volatile sig_atomic_t sighup_received = 0;
+
+static void sighupHandler(int sig) {
+    MODES_NOTUSED(sig);
+    // Set flag to indicate SIGHUP was received
+    // Actual reload will be handled in main thread for thread safety
+    sighup_received = 1;
+}
+
+// Thread-safe watchlist reload function
+static void handleWatchlistReload(void) {
+    if (!Modes.watchlist_enabled || !Modes.watchlist_config) {
+        log_with_timestamp("SIGHUP received but watchlist not enabled");
+        return;
+    }
+    
+    log_with_timestamp("SIGHUP received, reloading watchlist configuration...");
+    
+    // Store current state for comparison
+    uint32_t old_occupied = Modes.watchlist_config->occupied;
+    int old_cooldown = Modes.watchlist_config->cooldown_seconds;
+    time_t old_mtime = Modes.watchlist_config->last_mtime;
+    
+    // Attempt safe reload (preserves MQTT connections)
+    bool reload_success = watchlist_reload_safe(Modes.watchlist_config);
+    
+    if (reload_success) {
+        // Check if configuration actually changed
+        if (Modes.watchlist_config->last_mtime > old_mtime) {
+            log_with_timestamp("Watchlist configuration reloaded successfully: %u aircraft (was %u)", 
+                             Modes.watchlist_config->occupied, old_occupied);
+            
+            // Update alert publisher cooldown if it changed
+            if (Modes.alert_publisher && old_cooldown != Modes.watchlist_config->cooldown_seconds) {
+                Modes.alert_publisher->cooldown_seconds = Modes.watchlist_config->cooldown_seconds;
+                log_with_timestamp("Alert publisher cooldown updated to %d seconds", 
+                                 Modes.watchlist_config->cooldown_seconds);
+            }
+            
+            // Note: MQTT connection settings are preserved to avoid disrupting active connections
+            // Only watchlist entries and cooldown settings are updated
+        } else {
+            log_with_timestamp("Watchlist configuration file unchanged, no reload needed");
+        }
+    } else {
+        log_with_timestamp("Failed to reload watchlist configuration, keeping current settings");
+    }
+}
+#endif
 
 static void adjustUserLocationAccuracy(int verbose) {
     char *accString = "";
@@ -232,6 +289,34 @@ static void configSetDefaults(void) {
     Modes.trackExpireJaero = TRACK_EXPIRE_JAERO;
 
     Modes.fixDF = 1;
+    
+    // Watchlist and MQTT alerting defaults
+    #ifdef ENABLE_WATCHLIST
+    Modes.watchlist_enabled = 0;
+    Modes.watchlist_file_path = NULL;
+    Modes.mqtt_host = NULL;
+    Modes.mqtt_port = 1883;
+    Modes.mqtt_username = NULL;
+    Modes.mqtt_password = NULL;
+    Modes.mqtt_topic = strdup("meshtastic/adsb/watch");
+    Modes.mqtt_qos = 0;
+    Modes.mqtt_retain = 0;
+    Modes.watchlist_cooldown_seconds = 300;
+    Modes.enable_mqtt = 0;
+    Modes.watchlist_config = NULL;
+    Modes.alert_publisher = NULL;
+    Modes.mqtt_client = NULL;
+    
+    // Initialize CLI override flags
+    Modes.cli_mqtt_host_set = 0;
+    Modes.cli_mqtt_port_set = 0;
+    Modes.cli_mqtt_username_set = 0;
+    Modes.cli_mqtt_password_set = 0;
+    Modes.cli_mqtt_topic_set = 0;
+    Modes.cli_mqtt_qos_set = 0;
+    Modes.cli_mqtt_retain_set = 0;
+    Modes.cli_watchlist_cooldown_set = 0;
+    #endif
 
     sdrInitConfig();
 
@@ -377,6 +462,98 @@ static void modesInit(void) {
     if (Modes.outline_json) {
         Modes.rangeDirs = cmCalloc(RANGEDIRSSIZE);
     }
+    
+    // Initialize watchlist functionality if enabled
+    #ifdef ENABLE_WATCHLIST
+    if (Modes.watchlist_enabled) {
+        // Initialize watchlist configuration
+        Modes.watchlist_config = cmalloc(sizeof(watchlist_config_t));
+        if (!Modes.watchlist_config) {
+            fprintf(stderr, "Out of memory allocating watchlist configuration.\n");
+            exit(1);
+        }
+        
+        if (!watchlist_init(Modes.watchlist_config)) {
+            fprintf(stderr, "Failed to initialize watchlist configuration.\n");
+            exit(1);
+        }
+        
+        // Set default file path if not provided via CLI
+        if (!Modes.watchlist_file_path) {
+            Modes.watchlist_config->file_path = strdup(WATCHLIST_DEFAULT_FILE);
+        } else {
+            Modes.watchlist_config->file_path = strdup(Modes.watchlist_file_path);
+        }
+        
+        // Load watchlist file first (JSON configuration)
+        if (Modes.watchlist_config->file_path) {
+            watchlist_load(Modes.watchlist_config);
+        }
+        
+        // Apply CLI argument overrides after JSON loading (CLI takes precedence)
+        if (Modes.cli_mqtt_host_set) {
+            sfree(Modes.watchlist_config->mqtt_host);
+            Modes.watchlist_config->mqtt_host = strdup(Modes.mqtt_host);
+        }
+        if (Modes.cli_mqtt_port_set) {
+            Modes.watchlist_config->mqtt_port = Modes.mqtt_port;
+        }
+        if (Modes.cli_mqtt_username_set) {
+            sfree(Modes.watchlist_config->mqtt_username);
+            Modes.watchlist_config->mqtt_username = strdup(Modes.mqtt_username);
+        }
+        if (Modes.cli_mqtt_password_set) {
+            sfree(Modes.watchlist_config->mqtt_password);
+            Modes.watchlist_config->mqtt_password = strdup(Modes.mqtt_password);
+        }
+        if (Modes.cli_mqtt_topic_set) {
+            sfree(Modes.watchlist_config->mqtt_topic);
+            Modes.watchlist_config->mqtt_topic = strdup(Modes.mqtt_topic);
+        }
+        if (Modes.cli_mqtt_qos_set) {
+            Modes.watchlist_config->mqtt_qos = Modes.mqtt_qos;
+        }
+        if (Modes.cli_mqtt_retain_set) {
+            Modes.watchlist_config->mqtt_retain = Modes.mqtt_retain;
+        }
+        if (Modes.cli_watchlist_cooldown_set) {
+            Modes.watchlist_config->cooldown_seconds = Modes.watchlist_cooldown_seconds;
+        }
+        
+        // Initialize alert publisher
+        Modes.alert_publisher = cmalloc(sizeof(alert_publisher_t));
+        if (!Modes.alert_publisher) {
+            fprintf(stderr, "Out of memory allocating alert publisher.\n");
+            exit(1);
+        }
+        
+        if (!alert_publisher_init(Modes.alert_publisher, Modes.watchlist_config->cooldown_seconds)) {
+            fprintf(stderr, "Failed to initialize alert publisher.\n");
+            exit(1);
+        }
+        
+        // Initialize MQTT client if enabled
+        if (Modes.enable_mqtt) {
+            Modes.mqtt_client = cmalloc(sizeof(mqtt_client_t));
+            if (!Modes.mqtt_client) {
+                fprintf(stderr, "Out of memory allocating MQTT client.\n");
+                exit(1);
+            }
+            
+            if (!mqtt_client_init(Modes.mqtt_client, Modes.watchlist_config)) {
+                fprintf(stderr, "Failed to initialize MQTT client.\n");
+                exit(1);
+            }
+            
+            // Attempt initial connection
+            mqtt_client_connect(Modes.mqtt_client);
+        }
+        
+        fprintf(stderr, "Watchlist initialized: %u aircraft, MQTT %s\n", 
+                Modes.watchlist_config->occupied,
+                Modes.enable_mqtt ? "enabled" : "disabled");
+    }
+    #endif
 }
 
 static void lockThreads() {
@@ -487,6 +664,15 @@ void priorityTasksRun() {
         loadReplaceState();
         checkReplaceState();
     }
+
+#ifdef ENABLE_WATCHLIST
+    // Handle SIGHUP signal for watchlist reload (thread-safe under lock)
+    if (sighup_received) {
+        sighup_received = 0; // Reset flag
+        Modes.currentTask = "watchlistReload";
+        handleWatchlistReload();
+    }
+#endif
 
     // finish db update under lock
     if (dbFinishUpdate()) {
@@ -1392,6 +1578,22 @@ static void backgroundTasks(int64_t now) {
         if (Modes.mode_ac) {
             trackMatchAC(now);
         }
+        
+        // Watchlist periodic processing
+        #ifdef ENABLE_WATCHLIST
+        if (Modes.watchlist_enabled) {
+            // Process MQTT client (handle reconnections, etc.)
+            if (Modes.mqtt_client) {
+                mqtt_client_process(Modes.mqtt_client);
+            }
+            
+            // Check for watchlist file changes and reload if needed
+            if (Modes.watchlist_config && watchlist_needs_reload(Modes.watchlist_config)) {
+                fprintf(stderr, "Watchlist file changed, reloading...\n");
+                watchlist_load(Modes.watchlist_config);
+            }
+        }
+        #endif
     }
 }
 
@@ -1483,6 +1685,33 @@ static void cleanup_and_exit(int code) {
     }
 
     freeAircraftBack();
+    
+    // Cleanup watchlist functionality if enabled
+    #ifdef ENABLE_WATCHLIST
+    if (Modes.watchlist_enabled) {
+        if (Modes.mqtt_client) {
+            mqtt_client_cleanup(Modes.mqtt_client);
+            sfree(Modes.mqtt_client);
+        }
+        
+        if (Modes.alert_publisher) {
+            alert_publisher_cleanup(Modes.alert_publisher);
+            sfree(Modes.alert_publisher);
+        }
+        
+        if (Modes.watchlist_config) {
+            watchlist_cleanup(Modes.watchlist_config);
+            sfree(Modes.watchlist_config);
+        }
+        
+        // Free command line option strings
+        sfree(Modes.watchlist_file_path);
+        sfree(Modes.mqtt_host);
+        sfree(Modes.mqtt_username);
+        sfree(Modes.mqtt_password);
+        sfree(Modes.mqtt_topic);
+    }
+    #endif
 
     exit(code);
 }
@@ -2404,6 +2633,75 @@ static error_t parse_opt(int key, char *arg, struct argp_state *state) {
                 return ARGP_ERR_UNKNOWN;
             }
             break;
+            
+#ifdef ENABLE_WATCHLIST
+        case OptWatchlistFile:
+            sfree(Modes.watchlist_file_path);
+            Modes.watchlist_file_path = strdup(arg);
+            Modes.watchlist_enabled = 1;
+            break;
+        case OptMqttHost:
+            sfree(Modes.mqtt_host);
+            Modes.mqtt_host = strdup(arg);
+            Modes.cli_mqtt_host_set = 1;
+            Modes.watchlist_enabled = 1;
+            break;
+        case OptMqttPort:
+            Modes.mqtt_port = atoi(arg);
+            if (Modes.mqtt_port <= 0 || Modes.mqtt_port > 65535) {
+                fprintf(stderr, "Invalid MQTT port: %s (must be 1-65535)\n", arg);
+                return ARGP_ERR_UNKNOWN;
+            }
+            Modes.cli_mqtt_port_set = 1;
+            Modes.watchlist_enabled = 1;
+            break;
+        case OptMqttUsername:
+            sfree(Modes.mqtt_username);
+            Modes.mqtt_username = strdup(arg);
+            Modes.cli_mqtt_username_set = 1;
+            Modes.watchlist_enabled = 1;
+            break;
+        case OptMqttPassword:
+            sfree(Modes.mqtt_password);
+            Modes.mqtt_password = strdup(arg);
+            Modes.cli_mqtt_password_set = 1;
+            Modes.watchlist_enabled = 1;
+            break;
+        case OptMqttTopic:
+            sfree(Modes.mqtt_topic);
+            Modes.mqtt_topic = strdup(arg);
+            Modes.cli_mqtt_topic_set = 1;
+            Modes.watchlist_enabled = 1;
+            break;
+        case OptMqttQos:
+            Modes.mqtt_qos = atoi(arg);
+            if (Modes.mqtt_qos < 0 || Modes.mqtt_qos > 2) {
+                fprintf(stderr, "Invalid MQTT QoS: %s (must be 0, 1, or 2)\n", arg);
+                return ARGP_ERR_UNKNOWN;
+            }
+            Modes.cli_mqtt_qos_set = 1;
+            Modes.watchlist_enabled = 1;
+            break;
+        case OptMqttRetain:
+            Modes.mqtt_retain = 1;
+            Modes.cli_mqtt_retain_set = 1;
+            Modes.watchlist_enabled = 1;
+            break;
+        case OptWatchlistCooldown:
+            Modes.watchlist_cooldown_seconds = atoi(arg);
+            if (Modes.watchlist_cooldown_seconds < 0) {
+                fprintf(stderr, "Invalid watchlist cooldown: %s (must be non-negative)\n", arg);
+                return ARGP_ERR_UNKNOWN;
+            }
+            Modes.cli_watchlist_cooldown_set = 1;
+            Modes.watchlist_enabled = 1;
+            break;
+        case OptEnableMqtt:
+            Modes.enable_mqtt = 1;
+            Modes.watchlist_enabled = 1;
+            break;
+#endif
+            
         default:
             return ARGP_ERR_UNKNOWN;
     }
@@ -3024,7 +3322,12 @@ static void configureSignals() {
     signal(SIGINT, exitHandler);
     signal(SIGTERM, exitHandler);
     signal(SIGQUIT, exitHandler);
+    
+#ifdef ENABLE_WATCHLIST
+    signal(SIGHUP, sighupHandler);
+#else
     signal(SIGHUP, exitHandler);
+#endif
 
     // unblock signals now that signals are configured
     sigemptyset(&mask);

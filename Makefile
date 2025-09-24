@@ -1,5 +1,5 @@
 PROGNAME=readsb
-READSB_VERSION := "$(shell echo -n `cat version`; { git show -s --format=format: && echo -n ' wiedehopf git: ' && git describe --abbrev --dirty --always && git show -s --format=format:"(committed: %cd)" | tr -cd '[a-z],[A-Z],[0-9],:, ,\-,_,(,)';} || echo -n ' compiled on '`date +%y%m%d` )"
+READSB_VERSION := $(shell cat version) wiedehopf git: $(shell git describe --abbrev --dirty --always || echo nogit)
 
 RTLSDR ?= no
 BLADERF ?= no
@@ -10,10 +10,11 @@ AGGRESSIVE ?= no
 HAVE_BIASTEE ?= no
 TRACKS_UUID ?= no
 PRINT_UUIDS ?= no
+ENABLE_MQTT ?= auto
 
 DIALECT = -std=c11
 CFLAGS = $(DIALECT) -W -Wall -Werror -fno-common -O2
-CFLAGS += -DMODES_READSB_VERSION=\"$(READSB_VERSION)\"
+CFLAGS += -DMODES_READSB_VERSION=\"3.16.2\"
 CFLAGS += -DREADSB_SHORT_VERSION=\"$(shell cat version)\"
 CFLAGS += -DREADSB_SHORT_COMMIT=\"$(shell git describe --abbrev --dirty --always || echo nogit)\"
 CFLAGS += -Wdate-time -fstack-protector-strong -Wformat -Werror=format-security
@@ -153,6 +154,56 @@ ifeq ($(SOAPYSDR), yes)
     LIBS_SDR += $(shell pkg-config --libs SoapySDR)
 endif
 
+# MQTT support detection and configuration
+ifeq ($(ENABLE_MQTT), auto)
+    # Auto-detect libmosquitto availability
+    MQTT_AVAILABLE := $(shell pkg-config --exists libmosquitto 2>/dev/null && echo yes || echo no)
+    ifeq ($(MQTT_AVAILABLE), yes)
+        ENABLE_MQTT := yes
+        $(info MQTT support: auto-detected libmosquitto, enabling MQTT features)
+    else
+        ENABLE_MQTT := no
+        $(info MQTT support: libmosquitto not found, compiling without MQTT support)
+    endif
+else ifeq ($(ENABLE_MQTT), yes)
+    # Explicitly enabled - require libmosquitto
+    MQTT_AVAILABLE := $(shell pkg-config --exists libmosquitto 2>/dev/null && echo yes || echo no)
+    ifneq ($(MQTT_AVAILABLE), yes)
+        $(error MQTT support explicitly enabled but libmosquitto not found. Install libmosquitto-dev or set ENABLE_MQTT=no)
+    endif
+    $(info MQTT support: explicitly enabled)
+else
+    # Explicitly disabled
+    $(info MQTT support: explicitly disabled)
+endif
+
+# Watchlist support (can be enabled independently of MQTT)
+ifeq ($(ENABLE_WATCHLIST), yes)
+    CFLAGS += -DENABLE_WATCHLIST
+    WATCHLIST_OBJ = watchlist.o alert_publisher.o
+    $(info Watchlist support: enabled)
+else
+    WATCHLIST_OBJ =
+endif
+
+# MQTT support (requires watchlist)
+ifeq ($(ENABLE_MQTT), yes)
+    ifeq ($(ENABLE_WATCHLIST), yes)
+        CFLAGS += -DENABLE_MQTT
+        CFLAGS += $(shell pkg-config --cflags libmosquitto)
+        LIBS += $(shell pkg-config --libs libmosquitto)
+        MQTT_OBJ = mqtt_client.o
+        $(info MQTT support: enabled with watchlist)
+    else
+        $(error MQTT support requires ENABLE_WATCHLIST=yes)
+    endif
+else
+    MQTT_OBJ =
+endif
+
+# Combined object files
+WATCHLIST_MQTT_OBJ = $(WATCHLIST_OBJ) $(MQTT_OBJ)
+
 # add custom overrides if user defines them
 CFLAGS += -g $(OPTIMIZE)
 
@@ -174,7 +225,7 @@ readsb: readsb.o argp.o anet.o interactive.o mode_ac.o mode_s.o comm_b.o json_ou
 	uat2esnt/uat2esnt.o uat2esnt/uat_decode.o \
 	stats.o cpr.o icao_filter.o track.o util.o fasthash.o convert.o sdr_ifile.o sdr_beast.o sdr.o ais_charset.o \
 	globe_index.o geomag.o receiver.o aircraft.o api.o threadpool.o \
-	$(SDR_OBJ) $(COMPAT)
+	$(SDR_OBJ) $(WATCHLIST_MQTT_OBJ) $(COMPAT)
 	$(CC) -o $@ $^ $(LDFLAGS) $(LIBS) $(LIBS_SDR) $(OPTIMIZE)
 
 viewadsb: readsb

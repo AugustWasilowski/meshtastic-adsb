@@ -61,6 +61,14 @@ ifneq ($(filter biastee,$(DEB_BUILD_PROFILES)),)
         CONFIG_SWITCH += 'HAVE_BIASTEE=yes'
 endif
 
+ifneq ($(filter mqtt,$(DEB_BUILD_PROFILES)),)
+	CONFIG_SWITCH += 'ENABLE_MQTT=yes'
+endif
+
+ifneq ($(filter with_mqtt,$(DEB_BUILD_PROFILES)),)
+	CONFIG_SWITCH += 'ENABLE_MQTT=yes'
+endif
+
 override_dh_auto_build:
 	make -j$(shell nproc) $(CONFIG_SWITCH)
 	help2man -N --no-discard-stderr ./viewadsb > debian/viewadsb.1

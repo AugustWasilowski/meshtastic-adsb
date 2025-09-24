@@ -1,0 +1,19 @@
+{
+  "watchlist": [
+    "ABC123",
+    "def456", 
+    "0x789ABC",
+    "A12345",
+    "B67890"
+  ],
+  "cooldown_seconds": 300,
+  "mqtt": {
+    "host": "mqtt.example.com",
+    "port": 1883,
+    "username": "adsb_user",
+    "password": "secure_password",
+    "topic": "meshtastic/adsb/watch",
+    "qos": 0,
+    "retain": false
+  }
+}
